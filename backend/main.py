@@ -127,7 +127,6 @@ async def process_pdf(
             generation_type=generation_type,
             model=ai_model or None,
         )
-        _save_debug_image(img_bytes, tag="process")
 
         # ── Step 4: Render expanded background for compositing ─────────────
         bg_bytes, expanded_bbox, (pad_left, pad_top) = (
@@ -257,7 +256,6 @@ async def generate_image(
 
         # Return at the exact bbox size so the frontend can overlay it 1:1
         img_bytes = image_service.resize_to_bbox(img_bytes, int(width), int(height))
-        _save_debug_image(img_bytes, tag="generate_image")
 
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -452,6 +450,18 @@ def _build_prompt(
     Appends the selection dimensions so the model knows the exact
     pixel area it needs to fill.
     """
+    SYSTEM_INSTRUCTION = (
+        " Keep the background exactly as it is. Preserve all existing text, "
+        "graphics, and content in the image. Do not erase, replace, or alter "
+        "anything that was not explicitly requested — only apply the specific "
+        "change the user asked for. "
+        "If the change involves adding or modifying text, carefully match the "
+        "font size, font weight (bold/regular/light), font style (italic/normal), "
+        "letter spacing, and overall typographic appearance of the surrounding or "
+        "existing text in the image. If the change involves an object or graphic, "
+        "match its visual scale and proportional size relative to nearby elements."
+    )
+
     base = user_prompt or ""
     if width > 0 and height > 0:
         dim_hint = (
@@ -459,8 +469,8 @@ def _build_prompt(
             f"({'landscape' if width > height else 'portrait' if height > width else 'square'} orientation). "
             "Make sure the content fits naturally within this area without cropping."
         )
-        return base + dim_hint
-    return base
+        return base + dim_hint + SYSTEM_INSTRUCTION
+    return base + SYSTEM_INSTRUCTION
 
 
 def _nearest_edit_size(w: int, h: int) -> str:
@@ -471,25 +481,6 @@ def _nearest_edit_size(w: int, h: int) -> str:
     elif ratio < 0.8:
         return "1024x1536"   # portrait
     return "1024x1024"       # square
-
-
-# ── DEBUG: save generated images locally ─────────────────────────────────────
-_DEBUG_DIR = os.path.join(os.path.dirname(__file__), "debug_images")
-
-def _save_debug_image(img_bytes: bytes, tag: str = "gen") -> str:
-    """
-    Save *img_bytes* to <backend>/debug_images/ with a timestamp-based name.
-    Prints the absolute path so it's visible in the server logs.
-    Returns the path string.
-    """
-    import datetime
-    os.makedirs(_DEBUG_DIR, exist_ok=True)
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    path = os.path.join(_DEBUG_DIR, f"{tag}_{ts}.png")
-    with open(path, "wb") as f:
-        f.write(img_bytes)
-    print(f"[DEBUG] AI image saved → {path}", flush=True)
-    return path
 
 
 if __name__ == "__main__":
