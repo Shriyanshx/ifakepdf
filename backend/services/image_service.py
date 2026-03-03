@@ -55,9 +55,9 @@ class ImageService:
         target_height: int,
         pad_left: int = 15,
         pad_top: int = 15,
-        feather_radius: int = 10,
+        feather_radius: int = 4,
         noise_amount: float = 0.012,
-        bg_blend_factor: float = 0.10,
+        bg_blend_factor: float = 0.0,
         use_multiply: bool = True,
     ) -> bytes:
         """
@@ -105,42 +105,45 @@ class ImageService:
         x0, y0 = pad_left, pad_top
         x1 = min(pad_left + tw, full_w)
         y1 = min(pad_top + th, full_h)
-        bg_arr[y0:y1, x0:x1] = 255.0   # white out old content
-        bg_img = Image.fromarray(bg_arr.astype(np.uint8), "RGB")
 
-        # ── 1. Soft background removal ───────────────────────────────────────
-        gen_img = _soft_remove_white_bg(gen_img, threshold=220, softness=25)
-
-        # ── 2. Background tone matching ──────────────────────────────────────
-        # Sample tone from the surrounding border of the patch (not the
-        # white-filled center) so we match paper colour correctly.
+        # ── Sample paper tone from surrounding border ────────────────────────
         border_mask = np.ones((full_h, full_w), dtype=bool)
         border_mask[y0:y1, x0:x1] = False
-        bg_full_arr = np.array(bg_img, dtype=np.float32)
         if border_mask.any():
-            avg_border = bg_full_arr[border_mask].mean(axis=0)  # (3,)
+            avg_border = bg_arr[border_mask].mean(axis=0)  # (3,)
         else:
             avg_border = np.array([255.0, 255.0, 255.0])
-        bg_center = Image.fromarray(
-            np.full((th, tw, 3), avg_border, dtype=np.uint8), "RGB"
-        )
-        if bg_center.size != (tw, th):
-            bg_center = bg_center.resize((tw, th), Image.LANCZOS)
 
-        gen_img = _match_background_tone(gen_img, bg_center, factor=bg_blend_factor)
+        # Fill inner area with pure white.  The feather radius is small
+        # enough (4px) that the white-to-paper transition is invisible,
+        # and we avoid any yellowish tint bleeding inward.
+        bg_arr[y0:y1, x0:x1] = 255.0
+        bg_img = Image.fromarray(bg_arr.astype(np.uint8), "RGB")
+
+        # ── 1. Convert generated image to RGB (fully opaque) ─────────────────
+        # Do NOT remove white background: doing so makes stamp/signature white
+        # areas transparent, which lets the paper-tone fill bleed through and
+        # produces a yellow tint.  The stamp body should stay 100% opaque.
+        # Only the feather mask at the outer edges will become transparent.
+        gen_rgb = gen_img.convert("RGB")
+
+        # ── 2. (Optional) tone-match is disabled (factor=0) ──────────────────
+        # bg_blend_factor is 0.0 by default — no colour tinting.
+        if bg_blend_factor > 0:
+            bg_center = Image.new("RGB", (tw, th), (255, 255, 255))
+            gen_rgb = _match_background_tone(gen_rgb, bg_center, factor=bg_blend_factor)
 
         # ── 3. Blend mode ────────────────────────────────────────────────────
-        gen_rgb = gen_img.convert("RGB")
-        gen_alpha = gen_img.split()[3]
+        # Multiply only darkens ink against white; white×white = white → no-op.
+        # bg_center here is always white so multiply has no visible effect on
+        # the stamp body — we keep it as a hook for callers who pass a tinted
+        # bg_center explicitly.
+        blended_rgb = gen_rgb  # no-op by default (multiply vs white = identity)
 
-        if use_multiply:
-            blended_rgb = _multiply_blend(gen_rgb, bg_center)
-        else:
-            blended_rgb = gen_rgb
-
-        # ── 4. Feathered alpha mask ──────────────────────────────────────────
-        feather_mask = _create_feathered_mask(tw, th, feather_radius)
-        final_alpha = ImageChops.multiply(gen_alpha, feather_mask)
+        # ── 4. Feather mask = SOLE alpha channel ─────────────────────────────
+        # Full opacity in the center, fading only at the outer `feather_radius`
+        # pixels.  No bg-removal holes = no yellow bleed-through.
+        final_alpha = _create_feathered_mask(tw, th, feather_radius)
 
         # ── 5. Compose onto full background canvas ───────────────────────────
         # bg_img already has the inner area white-filled (step 0), so the
@@ -248,7 +251,7 @@ def _create_feathered_mask(
         # Very small region — just fill fully
         draw.rectangle([0, 0, width - 1, height - 1], fill=255)
 
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(radius * 0.6, 1)))
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(radius * 0.4, 0.5)))
     return mask
 
 
