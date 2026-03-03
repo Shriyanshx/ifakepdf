@@ -8,7 +8,7 @@ PyMuPDF==1.24.3          # fitz – redaction, image insertion, page rendering
 
 # ── Image processing ─────────────────────────────────────────────────────────
 Pillow==10.3.0
-numpy>=1.24.0             # array ops for compositing / blending pipeline
+numpy>=2.0.0              # array ops for compositing / blending pipeline (2.x required for Python 3.13)
 
 # ── AI backends (install what you need) ──────────────────────────────────────
 openai==1.30.1            # DALL-E 3/2 (set GENERATION_BACKEND=openai)
