@@ -16,6 +16,11 @@ import {
   X,
   RotateCcw,
   CheckCircle,
+  SlidersHorizontal,
+  ChevronDown,
+  ChevronUp,
+  Download,
+  PenLine,
 } from "lucide-react";
 import type { BBox } from "./PDFViewer";
 import { generateImage, insertImage } from "@/lib/api";
@@ -37,6 +42,9 @@ interface EditPanelProps {
   onPreviewReady: (imageBlob: Blob, bbox: BBox) => void;
   /** Called when preview is cancelled or regeneration is requested. */
   onCancelPreview: () => void;
+  /** URL to current result PDF for in-panel download (set after first edit). */
+  resultURL?: string | null;
+  onDownload?: () => void;
 }
 
 const GEN_TYPES: { value: GenerationType; label: string; desc: string }[] = [
@@ -60,6 +68,8 @@ export default function EditPanel({
   onReset,
   onPreviewReady,
   onCancelPreview,
+  resultURL,
+  onDownload,
 }: EditPanelProps) {
   const [genType, setGenType] = useState<GenerationType>("signature");
   const [prompt, setPrompt] = useState(PROMPT_PRESETS.signature);
@@ -70,6 +80,12 @@ export default function EditPanel({
   const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
   const [previewThumbURL, setPreviewThumbURL] = useState<string | null>(null);
   const refImageInputRef = useRef<HTMLInputElement>(null);
+
+  // ── Blending controls ───────────────────────────────────────────────────
+  const [showBlending, setShowBlending] = useState(false);
+  const [featherRadius, setFeatherRadius] = useState(4);
+  const [noiseAmount, setNoiseAmount] = useState(0.012);
+  const [edgeExpand, setEdgeExpand] = useState(15);
 
   // ── Handlers ────────────────────────────────────────────────────────────
   const handleTypeChange = (t: GenerationType) => {
@@ -127,10 +143,12 @@ export default function EditPanel({
         page: pageIndex,
         bbox: adjustedBBox,
         image: previewBlob,
+        featherRadius,
+        noiseAmount,
+        edgeExpand,
       });
       onResultReady(resultBlob);
       setStatus("done");
-      // clean up preview
       if (previewThumbURL) URL.revokeObjectURL(previewThumbURL);
       setPreviewBlob(null);
       setPreviewThumbURL(null);
@@ -157,9 +175,16 @@ export default function EditPanel({
     onCancelPreview();
   };
 
+  // Reset panel to idle for another edit (pdfFile already updated to modified PDF)
+  const handleEditAgain = () => {
+    setStatus("idle");
+    setErrorMsg("");
+  };
+
   const canGenerate = !!pdfFile && !!bbox && (status === "idle" || status === "error");
   const inPreview = status === "preview";
   const isWorking = status === "generating" || status === "inserting";
+  const isDone = status === "done";
 
   // ── Bbox info chip ──────────────────────────────────────────────────────
   const bboxChip = bbox ? (
@@ -176,14 +201,18 @@ export default function EditPanel({
   );
 
   return (
-    <div className="flex flex-col gap-5 h-full">
-      {/* ── Header ── */}
-      <div>
-        <h2 className="text-base font-semibold text-slate-100">Edit Region</h2>
-        <p className="text-xs text-slate-500 mt-0.5">
-          Configure what the AI should generate inside the selected area.
-        </p>
-      </div>
+    <div className="flex flex-col h-full">
+      {/* -----------------------------------------------------------------
+          Scrollable content area — form controls live here
+      ------------------------------------------------------------------ */}
+      <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-5 px-5 pt-6 pb-4">
+        {/* ── Header ── */}
+        <div>
+          <h2 className="text-base font-semibold text-slate-100">Edit Region</h2>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Configure what the AI should generate inside the selected area.
+          </p>
+        </div>
 
       {/* ── Selected region indicator ── */}
       {bboxChip}
@@ -265,8 +294,110 @@ export default function EditPanel({
         />
       </div>
 
-      {/* ── Spacer ── */}
-      <div className="flex-1" />
+        {/* ── Blending Controls (collapsible) ── */}
+        <div className="space-y-2">
+          <button
+            onClick={() => setShowBlending((v) => !v)}
+            className="flex items-center justify-between w-full text-xs font-medium text-slate-400 uppercase tracking-wider hover:text-slate-300 transition-colors"
+          >
+            <span className="flex items-center gap-1.5">
+              <SlidersHorizontal size={12} />
+              Blending Controls
+            </span>
+            {showBlending ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          </button>
+
+          {showBlending && (
+            <div className="space-y-3 rounded-lg border border-[#2e3348] bg-[#222636] p-3">
+              {/* Feather Radius */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] text-slate-400">Edge Feather</label>
+                  <span className="text-[11px] text-slate-500 font-mono">
+                    {featherRadius}px
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={15}
+                  step={1}
+                  value={featherRadius}
+                  onChange={(e) => setFeatherRadius(Number(e.target.value))}
+                  className="w-full accent-indigo-500 h-1.5 rounded-full appearance-none bg-slate-700 cursor-pointer"
+                />
+                <div className="flex justify-between text-[9px] text-slate-600">
+                  <span>Hard</span>
+                  <span>Soft</span>
+                </div>
+              </div>
+
+              {/* Noise Amount */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] text-slate-400">Grain / Noise</label>
+                  <span className="text-[11px] text-slate-500 font-mono">
+                    {(noiseAmount * 100).toFixed(1)}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={0.05}
+                  step={0.002}
+                  value={noiseAmount}
+                  onChange={(e) => setNoiseAmount(Number(e.target.value))}
+                  className="w-full accent-indigo-500 h-1.5 rounded-full appearance-none bg-slate-700 cursor-pointer"
+                />
+                <div className="flex justify-between text-[9px] text-slate-600">
+                  <span>None</span>
+                  <span>Heavy</span>
+                </div>
+              </div>
+
+              {/* Edge Expand */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] text-slate-400">Edge Expand</label>
+                  <span className="text-[11px] text-slate-500 font-mono">
+                    {edgeExpand}pt
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={30}
+                  step={1}
+                  value={edgeExpand}
+                  onChange={(e) => setEdgeExpand(Number(e.target.value))}
+                  className="w-full accent-indigo-500 h-1.5 rounded-full appearance-none bg-slate-700 cursor-pointer"
+                />
+                <div className="flex justify-between text-[9px] text-slate-600">
+                  <span>None</span>
+                  <span>Wide</span>
+                </div>
+              </div>
+
+              {/* Reset to defaults */}
+              <button
+                onClick={() => {
+                  setFeatherRadius(4);
+                  setNoiseAmount(0.012);
+                  setEdgeExpand(15);
+                }}
+                className="w-full text-[10px] text-indigo-400 hover:text-indigo-300 transition-colors"
+              >
+                Reset to defaults
+              </button>
+            </div>
+          )}
+        </div>
+      </div>{/* end scrollable area */}
+
+      {/* -----------------------------------------------------------------
+          Pinned bottom section — always visible, never scrolled away
+      ------------------------------------------------------------------ */}
+      <div className="shrink-0 flex flex-col gap-3 px-5 pt-4 pb-5 border-t border-[#1f2335]">
 
       {/* ── Preview thumbnail (shown in preview / inserting state) ── */}
       {(inPreview || status === "inserting") && previewThumbURL && (
@@ -295,79 +426,126 @@ export default function EditPanel({
         </div>
       )}
 
-      {/* ── Actions ── */}
-      <div className="space-y-2">
-        {/* Step 1: Generate Preview */}
-        {!inPreview && (
+      {/* ── Success screen ── */}
+      {isDone && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-3 py-3">
+            <CheckCircle size={16} className="text-emerald-400 shrink-0" />
+            <div>
+              <p className="text-xs font-semibold text-emerald-300">Edit applied!</p>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                The PDF has been updated. Select a new region to keep editing.
+              </p>
+            </div>
+          </div>
+
+          {/* Edit another region on the modified PDF */}
           <button
-            onClick={handleGeneratePreview}
-            disabled={!canGenerate || isWorking}
-            className="w-full flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold py-3 text-sm transition-all shadow-lg"
+            onClick={handleEditAgain}
+            className="w-full flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-3 text-sm transition-all shadow-lg"
           >
-            {status === "generating" ? (
-              <>
-                <div className="spinner" />
-                Generating…
-              </>
-            ) : (
-              <>
-                <Wand2 size={16} />
-                Generate Preview
-              </>
-            )}
+            <PenLine size={15} />
+            Edit Another Region
           </button>
-        )}
 
-        {/* Step 2: Confirm & Apply (only in preview / inserting state) */}
-        {(inPreview || status === "inserting") && (
-          <>
+          {/* Download the modified PDF */}
+          {onDownload && resultURL && (
             <button
-              onClick={handleConfirmInsert}
-              disabled={!adjustedBBox || isWorking}
-              className="w-full flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold py-3 text-sm transition-all shadow-lg"
+              onClick={onDownload}
+              className="w-full flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3 text-sm transition-all shadow-lg"
             >
-              {isWorking ? (
-                <>
-                  <div className="spinner" />
-                  Applying…
-                </>
-              ) : (
-                <>
-                  <CheckCircle size={16} />
-                  Confirm &amp; Apply
-                </>
-              )}
+              <Download size={15} />
+              Download PDF
             </button>
-            <button
-              onClick={handleRegenerate}
-              disabled={isWorking}
-              className="w-full flex items-center justify-center gap-2 rounded-xl border border-indigo-500/40 hover:bg-indigo-500/10 text-indigo-400 py-2.5 text-sm transition-all"
-            >
-              <Wand2 size={14} />
-              Regenerate
-            </button>
-            <button
-              onClick={handleCancel}
-              disabled={isWorking}
-              className="w-full flex items-center justify-center gap-2 rounded-xl border border-[#2e3348] hover:bg-[#2e3348] text-slate-400 py-2.5 text-sm transition-all"
-            >
-              <X size={14} />
-              Cancel
-            </button>
-          </>
-        )}
+          )}
 
-        {/* Reset always available when not generating */}
-        {!inPreview && !isWorking && (
+          {/* Load a completely new file */}
           <button
             onClick={onReset}
             className="w-full flex items-center justify-center gap-2 rounded-xl border border-[#2e3348] hover:bg-[#2e3348] text-slate-400 py-2.5 text-sm transition-all"
           >
             <RotateCcw size={14} />
-            Reset
+            New File
           </button>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* ── Normal actions (idle / generating / preview) ── */}
+      {!isDone && (
+        <div className="space-y-2">
+          {/* Step 1: Generate Preview */}
+          {!inPreview && (
+            <button
+              onClick={handleGeneratePreview}
+              disabled={!canGenerate || isWorking}
+              className="w-full flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold py-3 text-sm transition-all shadow-lg"
+            >
+              {status === "generating" ? (
+                <>
+                  <div className="spinner" />
+                  Generating…
+                </>
+              ) : (
+                <>
+                  <Wand2 size={16} />
+                  Generate Preview
+                </>
+              )}
+            </button>
+          )}
+
+          {/* Step 2: Confirm & Apply (only in preview / inserting state) */}
+          {(inPreview || status === "inserting") && (
+            <>
+              <button
+                onClick={handleConfirmInsert}
+                disabled={!adjustedBBox || isWorking}
+                className="w-full flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold py-3 text-sm transition-all shadow-lg"
+              >
+                {isWorking ? (
+                  <>
+                    <div className="spinner" />
+                    Applying…
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle size={16} />
+                    Confirm &amp; Apply
+                  </>
+                )}
+              </button>
+              <button
+                onClick={handleRegenerate}
+                disabled={isWorking}
+                className="w-full flex items-center justify-center gap-2 rounded-xl border border-indigo-500/40 hover:bg-indigo-500/10 text-indigo-400 py-2.5 text-sm transition-all"
+              >
+                <Wand2 size={14} />
+                Regenerate
+              </button>
+              <button
+                onClick={handleCancel}
+                disabled={isWorking}
+                className="w-full flex items-center justify-center gap-2 rounded-xl border border-[#2e3348] hover:bg-[#2e3348] text-slate-400 py-2.5 text-sm transition-all"
+              >
+                <X size={14} />
+                Cancel
+              </button>
+            </>
+          )}
+
+          {/* Reset / new file */}
+          {!inPreview && !isWorking && (
+            <button
+              onClick={onReset}
+              className="w-full flex items-center justify-center gap-2 rounded-xl border border-[#2e3348] hover:bg-[#2e3348] text-slate-400 py-2.5 text-sm transition-all"
+            >
+              <RotateCcw size={14} />
+              New File
+            </button>
+          )}
+        </div>
+      )}
+      </div>{/* end pinned bottom */}
     </div>
   );
 }

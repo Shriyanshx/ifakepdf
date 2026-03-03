@@ -57,6 +57,12 @@ export interface InsertImageOptions {
   page: number;
   bbox: BBoxPayload;
   image: Blob;
+  /** Edge feather radius in px (0 = hard edges, 1–10 = soft). Default: 4 */
+  featherRadius?: number;
+  /** Gaussian noise σ as fraction of 255 (0 = none). Default: 0.012 */
+  noiseAmount?: number;
+  /** Expansion padding in PDF pts for edge blending. Default: 15 */
+  edgeExpand?: number;
 }
 
 export async function insertImage(opts: InsertImageOptions): Promise<Blob> {
@@ -68,6 +74,12 @@ export async function insertImage(opts: InsertImageOptions): Promise<Blob> {
   form.append("width", String(opts.bbox.width));
   form.append("height", String(opts.bbox.height));
   form.append("image", opts.image, "generated.png");
+  if (opts.featherRadius !== undefined)
+    form.append("feather_radius", String(opts.featherRadius));
+  if (opts.noiseAmount !== undefined)
+    form.append("noise_amount", String(opts.noiseAmount));
+  if (opts.edgeExpand !== undefined)
+    form.append("edge_expand", String(opts.edgeExpand));
 
   const res = await fetch(`${API_BASE}/api/insert-image`, {
     method: "POST",

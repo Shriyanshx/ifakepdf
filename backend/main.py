@@ -55,6 +55,15 @@ async def process_pdf(
     reference_image: Optional[UploadFile] = File(
         None, description="Optional reference image to guide generation"
     ),
+    feather_radius: int = Form(
+        4, description="Edge feather radius in px (0=hard, 1-10=soft)",
+    ),
+    noise_amount: float = Form(
+        0.012, description="Gaussian noise σ as fraction of 255 (0=none)",
+    ),
+    edge_expand: float = Form(
+        15.0, description="Expansion padding in PDF pts for edge blending",
+    ),
 ):
     """
     Core endpoint:
@@ -73,7 +82,7 @@ async def process_pdf(
     user_ref_bytes = await reference_image.read() if reference_image else None
 
     # Expansion padding (PDF points) for seamless edge blending
-    EXPAND_PT = 15
+    EXPAND_PT = max(0.0, edge_expand)
 
     try:
         bbox = (x, y, width, height)
@@ -109,7 +118,6 @@ async def process_pdf(
         )
 
         # ── Step 5: Composite with seamless blending ───────────────────────
-        # Feathered edges + multiply blend + noise + tone matching
         use_multiply = generation_type in ("signature", "handwriting", "seal", "stamp")
         composited = image_service.prepare_for_insertion(
             generated_img_bytes=img_bytes,
@@ -118,6 +126,8 @@ async def process_pdf(
             target_height=int(height),
             pad_left=pad_left,
             pad_top=pad_top,
+            feather_radius=feather_radius,
+            noise_amount=noise_amount,
             use_multiply=use_multiply,
         )
 
@@ -225,6 +235,15 @@ async def insert_image_endpoint(
     width: float = Form(...),
     height: float = Form(...),
     image: UploadFile = File(..., description="Image to insert (PNG/JPEG)"),
+    feather_radius: int = Form(
+        4, description="Edge feather radius in px (0=hard, 1-10=soft)",
+    ),
+    noise_amount: float = Form(
+        0.012, description="Gaussian noise σ as fraction of 255 (0=none)",
+    ),
+    edge_expand: float = Form(
+        15.0, description="Expansion padding in PDF pts for edge blending",
+    ),
 ):
     """
     Step 2 of the two-step flow:
@@ -235,7 +254,7 @@ async def insert_image_endpoint(
         raise HTTPException(status_code=400, detail="Width and height must be positive")
 
     # Expansion padding (PDF points) for seamless edge blending
-    EXPAND_PT = 15
+    EXPAND_PT = max(0.0, edge_expand)
 
     pdf_bytes = await pdf.read()
     img_bytes = await image.read()
@@ -258,6 +277,8 @@ async def insert_image_endpoint(
             target_height=int(height),
             pad_left=pad_left,
             pad_top=pad_top,
+            feather_radius=feather_radius,
+            noise_amount=noise_amount,
         )
 
         # ── Insert composited result into PDF ──────────────────────────────

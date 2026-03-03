@@ -175,9 +175,9 @@ export default function Home() {
       </header>
 
       {/* Body */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* PDF Viewer */}
-        <div className="flex-1 overflow-y-auto px-6 py-8 flex justify-center">
+      <div className="flex flex-1">
+        {/* PDF Viewer — scrolls naturally with the page */}
+        <div className="flex-1 min-w-0 flex justify-center bg-[#0f1117] px-6 py-8">
           <PDFViewer
             file={pdfFile}
             pageIndex={pageIndex}
@@ -194,8 +194,8 @@ export default function Home() {
           />
         </div>
 
-        {/* Edit Panel */}
-        <aside className="w-80 shrink-0 border-l border-[#1f2335] bg-[#1a1d27] overflow-y-auto px-5 py-6">
+        {/* Edit Panel — sticky so it stays visible while scrolling the PDF */}
+        <aside className="w-80 shrink-0 border-l border-[#1f2335] bg-[#1a1d27] sticky top-[49px] h-[calc(100vh-49px)] flex flex-col overflow-hidden">
           <EditPanel
             pdfFile={pdfFile}
             pageIndex={pageIndex}
@@ -205,6 +205,8 @@ export default function Home() {
             onReset={handleReset}
             onPreviewReady={handlePreviewReady}
             onCancelPreview={handleCancelPreview}
+            resultURL={resultURL}
+            onDownload={handleDownload}
           />
         </aside>
       </div>
