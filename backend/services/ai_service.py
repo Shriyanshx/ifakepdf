@@ -33,6 +33,7 @@ class AIService:
         height: int,
         reference_image: Optional[bytes] = None,
         generation_type: str = "signature",
+        model: Optional[str] = None,
     ) -> bytes:
         """
         Generate an image and return PNG bytes.
@@ -42,16 +43,141 @@ class AIService:
             width / height:   Desired output dimensions in pixels.
             reference_image:  Optional reference image bytes.
             generation_type:  Hint for the generator.
+            model:            Optional explicit model name that overrides
+                              the GENERATION_BACKEND env var.
+                              Gemini models: "gemini-*"
+                              OpenAI models: "gpt-image-*", "dall-e-*", "chatgpt-*"
         """
-        if self.backend == "gemini":
+        # Determine backend from explicit model name if provided
+        if model:
+            m = model.lower()
+            if m.startswith("gemini"):
+                backend = "gemini"
+            elif any(m.startswith(p) for p in ("gpt-image", "dall-e", "chatgpt")):
+                backend = "openai"
+            else:
+                backend = self.backend
+        else:
+            backend = self.backend
+
+        if backend == "gemini":
             return await self._generate_gemini(prompt, width, height, reference_image)
-        elif self.backend == "openai":
-            return await self._generate_openai(prompt, width, height, reference_image)
-        elif self.backend == "stability":
+        elif backend == "openai":
+            return await self._generate_openai(prompt, width, height, reference_image, model=model)
+        elif backend == "stability":
             return await self._generate_stability(prompt, width, height, reference_image)
         else:
             # Development stub – generates a plausible-looking placeholder
             return self._generate_stub(prompt, width, height, generation_type)
+
+    # ── Public: OpenAI image-edit API ─────────────────────────────────────────
+    async def edit_region(
+        self,
+        image_bytes: bytes,
+        prompt: str,
+        model: str = "gpt-image-1",
+        quality: str = "auto",
+        size: str = "1024x1024",
+    ) -> bytes:
+        """
+        Edit an existing image region using OpenAI's /v1/images/edits endpoint.
+
+        Supports GPT image models (gpt-image-1, gpt-image-1-mini, gpt-image-1.5,
+        chatgpt-image-latest) via JSON body with base64 image_url, and dall-e-2
+        via multipart form upload.
+
+        Returns PNG bytes.
+        """
+        try:
+            import httpx
+            import base64
+        except ImportError:
+            raise RuntimeError("httpx package not installed: pip install httpx")
+
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY environment variable not set")
+
+        # Normalise input to PNG
+        png_bytes = _to_png(image_bytes)
+
+        if model == "dall-e-2":
+            # dall-e-2 uses the classic multipart/form-data format
+            return await self._edit_dalle2(png_bytes, prompt, api_key, size)
+
+        # GPT image models accept a JSON body with base64 data URLs
+        b64_image = base64.b64encode(png_bytes).decode()
+        image_data_url = f"data:image/png;base64,{b64_image}"
+
+        # Map arbitrary size to valid GPT image edit size
+        valid_sizes = {"1024x1024", "1536x1024", "1024x1536", "auto"}
+        if size not in valid_sizes:
+            size = "1024x1024"
+
+        payload: dict = {
+            "images": [{"image_url": image_data_url}],
+            "prompt": prompt,
+            "model": model,
+            "quality": quality,
+            "size": size,
+            "n": 1,
+            "output_format": "png",
+        }
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/images/edits",
+                headers=headers,
+                json=payload,
+            )
+            if not resp.is_success:
+                try:
+                    err_body = resp.json()
+                except Exception:
+                    err_body = resp.text
+                raise RuntimeError(
+                    f"OpenAI image edit error {resp.status_code}: {err_body}"
+                )
+            data = resp.json()
+
+        b64_data = data["data"][0]["b64_json"]
+        return base64.b64decode(b64_data)
+
+    async def _edit_dalle2(
+        self,
+        png_bytes: bytes,
+        prompt: str,
+        api_key: str,
+        size: str,
+    ) -> bytes:
+        """dall-e-2 image edit via multipart form (classic OpenAI Python SDK)."""
+        try:
+            from openai import AsyncOpenAI
+        except ImportError:
+            raise RuntimeError("openai package not installed: pip install openai")
+
+        import base64
+
+        client = AsyncOpenAI(api_key=api_key)
+
+        # dall-e-2 accepts 256x256, 512x512, 1024x1024
+        if size not in {"256x256", "512x512", "1024x1024"}:
+            size = "1024x1024"
+
+        import io
+        response = await client.images.edit(
+            image=("region.png", io.BytesIO(png_bytes), "image/png"),
+            prompt=prompt,
+            size=size,  # type: ignore[arg-type]
+            response_format="b64_json",
+            n=1,
+        )
+        return base64.b64decode(response.data[0].b64_json)
 
     # ── Google Gemini ──────────────────────────────────────────────────────────
     async def _generate_gemini(
@@ -156,6 +282,7 @@ class AIService:
         width: int,
         height: int,
         reference_image: Optional[bytes],
+        model: Optional[str] = None,
     ) -> bytes:
         try:
             from openai import AsyncOpenAI
@@ -179,8 +306,11 @@ class AIService:
             "no borders, no shadows, high resolution, photorealistic."
         )
 
+        # Use the explicitly requested model when it's an OpenAI model,
+        # otherwise fall back to dall-e-3 as the default generator.
+        openai_model = model if model and not model.startswith("gemini") else "dall-e-3"
         response = await client.images.generate(
-            model="dall-e-3",
+            model=openai_model,
             prompt=enhanced_prompt,
             size=dalle_size,
             quality="standard",

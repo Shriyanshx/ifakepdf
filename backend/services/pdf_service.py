@@ -216,3 +216,64 @@ class PDFService:
             dims.append({"page": i, "width": r.width, "height": r.height})
         doc.close()
         return dims
+
+    # ── Redact (color fill) ───────────────────────────────────────────────────
+    def redact_region(
+        self,
+        pdf_bytes: bytes,
+        page_index: int,
+        bbox: Tuple[float, float, float, float],
+        color: Tuple[float, float, float] = (0, 0, 0),
+    ) -> bytes:
+        """Fill the specified region with a solid color (default: black)."""
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        if page_index >= len(doc):
+            raise ValueError(f"Page {page_index} out of range ({len(doc)} pages)")
+        page = doc[page_index]
+        x, y, w, h = bbox
+        page_h = page.rect.height
+        rect = fitz.Rect(x, page_h - (y + h), x + w, page_h - y)
+        page.draw_rect(rect, color=None, fill=color, overlay=True)
+        out = io.BytesIO()
+        doc.save(out, deflate=True, garbage=4)
+        doc.close()
+        return out.getvalue()
+
+    # ── Whiten ────────────────────────────────────────────────────────────────
+    def whiten_region(
+        self,
+        pdf_bytes: bytes,
+        page_index: int,
+        bbox: Tuple[float, float, float, float],
+    ) -> bytes:
+        """Fill the specified region with white."""
+        return self.redact_region(pdf_bytes, page_index, bbox, color=(1, 1, 1))
+
+    # ── Add text in a box ─────────────────────────────────────────────────────
+    def add_text_box(
+        self,
+        pdf_bytes: bytes,
+        page_index: int,
+        bbox: Tuple[float, float, float, float],
+        text: str,
+        font_size: float = 12,
+        color: Tuple[float, float, float] = (0, 0, 0),
+        font_name: str = "helv",
+        align: int = 0,
+    ) -> bytes:
+        """Insert text within the specified rectangle."""
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        if page_index >= len(doc):
+            raise ValueError(f"Page {page_index} out of range ({len(doc)} pages)")
+        page = doc[page_index]
+        x, y, w, h = bbox
+        page_h = page.rect.height
+        rect = fitz.Rect(x, page_h - (y + h), x + w, page_h - y)
+        page.insert_textbox(
+            rect, text, fontsize=font_size, color=color,
+            fontname=font_name, align=align,
+        )
+        out = io.BytesIO()
+        doc.save(out, deflate=True, garbage=4)
+        doc.close()
+        return out.getvalue()

@@ -52,6 +52,8 @@ interface PDFViewerProps {
   /** Emitted when user drags the preview image to a new position */
   onPreviewMove?: (newBBox: BBox) => void;
   scale?: number;
+  /** Active editing tool — changes cursor and hint display */
+  toolMode?: string;
 }
 
 interface DrawDrag {
@@ -67,6 +69,10 @@ interface PreviewDrag {
   startBBox: BBox;
 }
 
+type ResizeHandle = "nw" | "ne" | "sw" | "se" | null;
+
+const HANDLE_SIZE = 8; // px – clickable radius around each corner
+
 export default function PDFViewer({
   file,
   pageIndex,
@@ -77,6 +83,7 @@ export default function PDFViewer({
   previewOverlay = null,
   onPreviewMove,
   scale = 1.5,
+  toolMode = "select",
 }: PDFViewerProps) {
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
@@ -86,6 +93,13 @@ export default function PDFViewer({
   const [drawDrag, setDrawDrag] = useState<DrawDrag | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [previewDrag, setPreviewDrag] = useState<PreviewDrag | null>(null);
+  const [resizeDrag, setResizeDrag] = useState<{
+    handle: ResizeHandle;
+    startCanvasX: number;
+    startCanvasY: number;
+    startBBox: BBox;
+  } | null>(null);
+  const [hoveredHandle, setHoveredHandle] = useState<ResizeHandle>(null);
   const [loading, setLoading] = useState(true);
 
   // ── Load PDF ──────────────────────────────────────────────────────────────
@@ -161,30 +175,89 @@ export default function PDFViewer({
     [previewOverlay, pdfToCanvas]
   );
 
+  /** Detect which resize corner handle (if any) the cursor is over */
+  const getResizeHandle = useCallback(
+    (canvasX: number, canvasY: number): ResizeHandle => {
+      if (!previewOverlay || !viewportRef.current) return null;
+      const { bbox } = previewOverlay;
+      const tl = pdfToCanvas(bbox.x, bbox.y + bbox.height);
+      const br = pdfToCanvas(bbox.x + bbox.width, bbox.y);
+      const left = Math.min(tl.cx, br.cx);
+      const top = Math.min(tl.cy, br.cy);
+      const right = Math.max(tl.cx, br.cx);
+      const bottom = Math.max(tl.cy, br.cy);
+      const H = HANDLE_SIZE;
+
+      if (Math.abs(canvasX - left) <= H && Math.abs(canvasY - top) <= H) return "nw";
+      if (Math.abs(canvasX - right) <= H && Math.abs(canvasY - top) <= H) return "ne";
+      if (Math.abs(canvasX - left) <= H && Math.abs(canvasY - bottom) <= H) return "sw";
+      if (Math.abs(canvasX - right) <= H && Math.abs(canvasY - bottom) <= H) return "se";
+      return null;
+    },
+    [previewOverlay, pdfToCanvas]
+  );
+
   // ── Mouse handlers ────────────────────────────────────────────────────────
   const onMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     const { x, y } = getRelativePos(e);
 
-    if (previewOverlay && isInsidePreview(x, y)) {
-      // Start dragging the preview image
-      setPreviewDrag({ startCanvasX: x, startCanvasY: y, startBBox: previewOverlay.bbox });
-    } else {
-      // Start drawing a selection (draw mode)
-      setIsDrawing(true);
-      setDrawDrag({ startX: x, startY: y, endX: x, endY: y });
+    if (previewOverlay) {
+      // Check resize handles first (higher priority)
+      const handle = getResizeHandle(x, y);
+      if (handle) {
+        setResizeDrag({ handle, startCanvasX: x, startCanvasY: y, startBBox: previewOverlay.bbox });
+        return;
+      }
+      // Then check move (inside preview)
+      if (isInsidePreview(x, y)) {
+        setPreviewDrag({ startCanvasX: x, startCanvasY: y, startBBox: previewOverlay.bbox });
+        return;
+      }
     }
+    // Otherwise start drawing a selection
+    setIsDrawing(true);
+    setDrawDrag({ startX: x, startY: y, endX: x, endY: y });
   };
 
   const onMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     const { x, y } = getRelativePos(e);
 
+    // ── Resize drag ──
+    if (resizeDrag) {
+      const dx = (x - resizeDrag.startCanvasX) / scale;
+      const dy = -(y - resizeDrag.startCanvasY) / scale; // flip y
+      const sb = resizeDrag.startBBox;
+      let newX = sb.x, newY = sb.y, newW = sb.width, newH = sb.height;
+
+      const h = resizeDrag.handle;
+      if (h === "se") {
+        newW = Math.max(10, sb.width + dx);
+        newH = Math.max(10, sb.height - dy);
+      } else if (h === "sw") {
+        newX = sb.x + dx;
+        newW = Math.max(10, sb.width - dx);
+        newH = Math.max(10, sb.height - dy);
+      } else if (h === "ne") {
+        newY = sb.y + dy;
+        newW = Math.max(10, sb.width + dx);
+        newH = Math.max(10, sb.height + dy);
+      } else if (h === "nw") {
+        newX = sb.x + dx;
+        newY = sb.y + dy;
+        newW = Math.max(10, sb.width - dx);
+        newH = Math.max(10, sb.height + dy);
+      }
+
+      onPreviewMove?.({ x: newX, y: newY, width: newW, height: newH });
+      return;
+    }
+
+    // ── Move drag ──
     if (previewDrag) {
-      // Move the preview image
       const dx = x - previewDrag.startCanvasX;
       const dy = y - previewDrag.startCanvasY;
-      // Convert canvas pixel delta → PDF point delta using scale
       const dxPt = dx / scale;
-      const dyPt = -(dy / scale); // flip y: canvas y increases down, PDF y increases up
+      const dyPt = -(dy / scale);
       const newBBox: BBox = {
         x: previewDrag.startBBox.x + dxPt,
         y: previewDrag.startBBox.y + dyPt,
@@ -192,12 +265,25 @@ export default function PDFViewer({
         height: previewDrag.startBBox.height,
       };
       onPreviewMove?.(newBBox);
-    } else if (isDrawing && drawDrag) {
+      return;
+    }
+
+    // ── Hover detection for resize cursor ──
+    if (previewOverlay && !isDrawing) {
+      setHoveredHandle(getResizeHandle(x, y));
+    }
+
+    // ── Draw mode ──
+    if (isDrawing && drawDrag) {
       setDrawDrag((d) => d && { ...d, endX: x, endY: y });
     }
   };
 
   const onMouseUp = () => {
+    if (resizeDrag) {
+      setResizeDrag(null);
+      return;
+    }
     if (previewDrag) {
       setPreviewDrag(null);
       return;
@@ -213,7 +299,6 @@ export default function PDFViewer({
 
     if (x1 - x0 < 8 || y1 - y0 < 8) { setDrawDrag(null); return; }
 
-    // Convert corners to PDF user space
     const tl = canvasToPDF(x0, y0);
     const br = canvasToPDF(x1, y1);
 
@@ -252,15 +337,37 @@ export default function PDFViewer({
   const confirmedStyle = activeBBox && !isDrawing ? bboxToCanvasStyle(activeBBox) : null;
   const previewStyle = previewOverlay ? bboxToCanvasStyle(previewOverlay.bbox) : null;
 
-  const cursor = previewDrag ? "grabbing" : previewOverlay ? "grab" : "crosshair";
+  const getCursor = () => {
+    if (resizeDrag) {
+      const c: Record<string, string> = { nw: "nwse-resize", ne: "nesw-resize", sw: "nesw-resize", se: "nwse-resize" };
+      return c[resizeDrag.handle!] ?? "nwse-resize";
+    }
+    if (hoveredHandle) {
+      const c: Record<string, string> = { nw: "nwse-resize", ne: "nesw-resize", sw: "nesw-resize", se: "nwse-resize" };
+      return c[hoveredHandle] ?? "nwse-resize";
+    }
+    if (previewDrag) return "grabbing";
+    if (previewOverlay) return "grab";
+    if (toolMode === "text") return "text";
+    return "crosshair";
+  };
+  const cursor = getCursor();
 
   return (
     <div className="flex flex-col items-center gap-4 w-full">
       {/* Hint text */}
       {previewOverlay ? (
         <p className="text-xs text-indigo-400 bg-indigo-500/10 border border-indigo-500/30 rounded-full px-4 py-1.5">
-          Drag the image to reposition → click <strong>Confirm & Apply</strong> when ready
+          Drag to reposition · corner handles to resize → <strong>Confirm & Apply</strong>
         </p>
+      ) : toolMode === "redact" ? (
+        <p className="text-xs text-slate-500">Drag on the page to select a region to <strong className="text-red-400">redact</strong></p>
+      ) : toolMode === "whiten" ? (
+        <p className="text-xs text-slate-500">Drag on the page to select a region to <strong className="text-yellow-300">whiten</strong></p>
+      ) : toolMode === "text" ? (
+        <p className="text-xs text-slate-500">Drag a box where you want to <strong className="text-blue-400">place text</strong></p>
+      ) : toolMode === "addimage" ? (
+        <p className="text-xs text-slate-500">Drag a box where you want to <strong className="text-emerald-400">place the image</strong></p>
       ) : (
         <p className="text-xs text-slate-500">Drag on the page to select a region</p>
       )}
@@ -317,8 +424,27 @@ export default function PDFViewer({
             />
             {/* Corner label */}
             <div className="absolute -top-5 left-0 text-[10px] text-indigo-300 bg-indigo-600/80 rounded-sm px-1.5 py-0.5 whitespace-nowrap">
-              drag to reposition
+              drag to move · corners to resize
             </div>
+            {/* Resize corner handles */}
+            {(["nw", "ne", "sw", "se"] as const).map((h) => {
+              const isH = hoveredHandle === h || resizeDrag?.handle === h;
+              return (
+                <div
+                  key={h}
+                  className="absolute pointer-events-none"
+                  style={{
+                    width: 10,
+                    height: 10,
+                    borderRadius: 2,
+                    background: isH ? "#818cf8" : "#6366f1",
+                    border: "2px solid #c7d2fe",
+                    ...(h.includes("n") ? { top: -5 } : { bottom: -5 }),
+                    ...(h.includes("w") ? { left: -5 } : { right: -5 }),
+                  }}
+                />
+              );
+            })}
           </div>
         )}
 

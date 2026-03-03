@@ -3,9 +3,9 @@ ifakepdf – Backend API
 FastAPI server that handles PDF region erasing and AI image insertion.
 """
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import Cookie, Depends, FastAPI, Request, Response, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse
 import uvicorn
 import tempfile
 import os
@@ -14,6 +14,7 @@ from typing import Optional
 from services.pdf_service import PDFService
 from services.ai_service import AIService
 from services.image_service import ImageService
+from services.rate_limiter import enforce_rate_limit, get_status
 
 app = FastAPI(title="ifakepdf API", version="1.0.0")
 
@@ -36,8 +37,19 @@ async def health():
     return {"status": "ok", "service": "ifakepdf"}
 
 
+@app.get("/api/rate-limit-status")
+async def rate_limit_status(
+    request: Request,
+    response: Response,
+    rl_id: Optional[str] = Cookie(default=None),
+):
+    """Returns the caller's remaining generation quota for the current 24-hour window."""
+    return get_status(request, response, rl_id)
+
+
 @app.post("/api/process")
 async def process_pdf(
+    _rl: dict = Depends(enforce_rate_limit),
     pdf: UploadFile = File(..., description="Original PDF file"),
     page: int = Form(..., description="0-based page index"),
     x: float = Form(..., description="Bounding box X (PDF pts)"),
@@ -64,6 +76,7 @@ async def process_pdf(
     edge_expand: float = Form(
         15.0, description="Expansion padding in PDF pts for edge blending",
     ),
+    ai_model: Optional[str] = Form(None, description="Explicit AI model override"),
 ):
     """
     Core endpoint:
@@ -96,7 +109,7 @@ async def process_pdf(
         ref_bytes = user_ref_bytes if user_ref_bytes else region_crop
 
         # ── Step 2: Build the generation prompt ────────────────────────────
-        full_prompt = _build_prompt(prompt, generation_type)
+        full_prompt = _build_prompt(prompt, generation_type, width, height)
 
         # ── Step 3: Generate AI image sized to the bbox ────────────────────
         # Generate at 2× for quality; compositing will resize to fit.
@@ -108,7 +121,9 @@ async def process_pdf(
             height=gen_height,
             reference_image=ref_bytes,
             generation_type=generation_type,
+            model=ai_model or None,
         )
+        _save_debug_image(img_bytes, tag="process")
 
         # ── Step 4: Render expanded background for compositing ─────────────
         bg_bytes, expanded_bbox, (pad_left, pad_top) = (
@@ -173,6 +188,7 @@ async def preview_region(
 
 @app.post("/api/generate-image")
 async def generate_image(
+    _rl: dict = Depends(enforce_rate_limit),
     pdf: UploadFile = File(..., description="PDF to crop region from"),
     page: int = Form(...),
     x: float = Form(...),
@@ -182,10 +198,17 @@ async def generate_image(
     prompt: Optional[str] = Form("handwritten signature in blue ink"),
     generation_type: str = Form("signature"),
     reference_image: Optional[UploadFile] = File(None),
+    # ── New: model selection & edit-mode ───────────────────────────────────
+    ai_model: Optional[str] = Form(None, description="OpenAI model for generation/editing"),
+    use_edit: bool = Form(False, description="Use OpenAI image-edit API instead of generate"),
+    edit_quality: str = Form("auto", description="Quality for GPT image edit (auto/low/medium/high)"),
 ):
     """
     Step 1 of the two-step flow:
-    Generates an image and returns it as PNG WITHOUT modifying the PDF.
+    Generates (or edits) an image and returns it as PNG WITHOUT modifying the PDF.
+
+    When use_edit=true, calls the OpenAI /v1/images/edits endpoint using the
+    selected region as the source image and the prompt as the edit instruction.
     The frontend shows this as a draggable preview overlay.
     """
     if width <= 0 or height <= 0:
@@ -197,24 +220,40 @@ async def generate_image(
     try:
         bbox = (x, y, width, height)
 
-        # Always crop the selected region and use it as context for the AI
+        # Crop the selected region (used both as AI context and as edit source)
         region_crop = pdf_service.crop_region(pdf_bytes, page, bbox)
         ref_bytes = user_ref_bytes if user_ref_bytes else region_crop
 
-        full_prompt = _build_prompt(prompt, generation_type)
+        full_prompt = _build_prompt(prompt, generation_type, width, height)
 
-        gen_width = max(int(width * 2), 64)
-        gen_height = max(int(height * 2), 64)
-        img_bytes = await ai_service.generate(
-            prompt=full_prompt,
-            width=gen_width,
-            height=gen_height,
-            reference_image=ref_bytes,
-            generation_type=generation_type,
-        )
+        if use_edit:
+            # ── OpenAI image-edit path ─────────────────────────────────────
+            model = ai_model or "gpt-image-1"
+            # Pick the nearest standard size for best output quality
+            edit_size = _nearest_edit_size(int(width), int(height))
+            img_bytes = await ai_service.edit_region(
+                image_bytes=region_crop,
+                prompt=full_prompt,
+                model=model,
+                quality=edit_quality,
+                size=edit_size,
+            )
+        else:
+            # ── Standard generation path ───────────────────────────────────
+            gen_width = max(int(width * 2), 64)
+            gen_height = max(int(height * 2), 64)
+            img_bytes = await ai_service.generate(
+                prompt=full_prompt,
+                width=gen_width,
+                height=gen_height,
+                reference_image=ref_bytes,
+                generation_type=generation_type,
+                model=ai_model or None,
+            )
 
         # Return at the exact bbox size so the frontend can overlay it 1:1
         img_bytes = image_service.resize_to_bbox(img_bytes, int(width), int(height))
+        _save_debug_image(img_bytes, tag="generate_image")
 
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -299,9 +338,154 @@ async def insert_image_endpoint(
     )
 
 
-def _build_prompt(user_prompt: Optional[str], generation_type: str) -> str:
-    """Return the user prompt as-is, without prepending any style descriptors."""
-    return user_prompt or ""
+# ── New editing endpoints ──────────────────────────────────────────────────
+
+
+@app.post("/api/redact-region")
+async def redact_region_endpoint(
+    pdf: UploadFile = File(...),
+    page: int = Form(...),
+    x: float = Form(...),
+    y: float = Form(...),
+    width: float = Form(...),
+    height: float = Form(...),
+    color: str = Form("#000000", description="Hex color for redaction fill"),
+):
+    """Apply a colored fill over the specified region (redaction)."""
+    if width <= 0 or height <= 0:
+        raise HTTPException(status_code=400, detail="Width and height must be positive")
+    pdf_bytes = await pdf.read()
+    rgb = _hex_to_rgb(color)
+    try:
+        result_pdf = pdf_service.redact_region(
+            pdf_bytes, page, (x, y, width, height), color=rgb,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return Response(
+        content=result_pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=modified.pdf"},
+    )
+
+
+@app.post("/api/whiten-region")
+async def whiten_region_endpoint(
+    pdf: UploadFile = File(...),
+    page: int = Form(...),
+    x: float = Form(...),
+    y: float = Form(...),
+    width: float = Form(...),
+    height: float = Form(...),
+):
+    """White-fill the specified region."""
+    if width <= 0 or height <= 0:
+        raise HTTPException(status_code=400, detail="Width and height must be positive")
+    pdf_bytes = await pdf.read()
+    try:
+        result_pdf = pdf_service.whiten_region(pdf_bytes, page, (x, y, width, height))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return Response(
+        content=result_pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=modified.pdf"},
+    )
+
+
+@app.post("/api/add-text")
+async def add_text_endpoint(
+    pdf: UploadFile = File(...),
+    page: int = Form(...),
+    x: float = Form(...),
+    y: float = Form(...),
+    width: float = Form(...),
+    height: float = Form(...),
+    text: str = Form(..., description="Text content to insert"),
+    font_size: float = Form(12),
+    font_color: str = Form("#000000"),
+    font_family: str = Form("helv"),
+    align: int = Form(0, description="0=left, 1=center, 2=right, 3=justify"),
+):
+    """Insert text within the specified rectangle."""
+    if width <= 0 or height <= 0:
+        raise HTTPException(status_code=400, detail="Width and height must be positive")
+    pdf_bytes = await pdf.read()
+    rgb = _hex_to_rgb(font_color)
+    try:
+        result_pdf = pdf_service.add_text_box(
+            pdf_bytes, page, (x, y, width, height), text,
+            font_size=font_size, color=rgb, font_name=font_family, align=align,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return Response(
+        content=result_pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=modified.pdf"},
+    )
+
+
+def _hex_to_rgb(hex_color: str) -> tuple:
+    """Convert #RRGGBB to (r, g, b) with values 0.0-1.0."""
+    hex_color = hex_color.lstrip("#")
+    if len(hex_color) != 6:
+        return (0.0, 0.0, 0.0)
+    r = int(hex_color[0:2], 16) / 255.0
+    g = int(hex_color[2:4], 16) / 255.0
+    b = int(hex_color[4:6], 16) / 255.0
+    return (r, g, b)
+
+
+def _build_prompt(
+    user_prompt: Optional[str],
+    generation_type: str,
+    width: float = 0,
+    height: float = 0,
+) -> str:
+    """
+    Build the final prompt sent to the AI.
+    Appends the selection dimensions so the model knows the exact
+    pixel area it needs to fill.
+    """
+    base = user_prompt or ""
+    if width > 0 and height > 0:
+        dim_hint = (
+            f" The output image must fill exactly {round(width)}x{round(height)} points "
+            f"({'landscape' if width > height else 'portrait' if height > width else 'square'} orientation). "
+            "Make sure the content fits naturally within this area without cropping."
+        )
+        return base + dim_hint
+    return base
+
+
+def _nearest_edit_size(w: int, h: int) -> str:
+    """Map arbitrary bbox dimensions to the nearest valid GPT image edit size."""
+    ratio = w / h if h else 1
+    if ratio > 1.2:
+        return "1536x1024"   # landscape
+    elif ratio < 0.8:
+        return "1024x1536"   # portrait
+    return "1024x1024"       # square
+
+
+# ── DEBUG: save generated images locally ─────────────────────────────────────
+_DEBUG_DIR = os.path.join(os.path.dirname(__file__), "debug_images")
+
+def _save_debug_image(img_bytes: bytes, tag: str = "gen") -> str:
+    """
+    Save *img_bytes* to <backend>/debug_images/ with a timestamp-based name.
+    Prints the absolute path so it's visible in the server logs.
+    Returns the path string.
+    """
+    import datetime
+    os.makedirs(_DEBUG_DIR, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    path = os.path.join(_DEBUG_DIR, f"{tag}_{ts}.png")
+    with open(path, "wb") as f:
+        f.write(img_bytes)
+    print(f"[DEBUG] AI image saved → {path}", flush=True)
+    return path
 
 
 if __name__ == "__main__":
