@@ -1,0 +1,21 @@
+# ── Core ──────────────────────────────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9
+
+# ── PDF manipulation ──────────────────────────────────────────────────────────
+PyMuPDF==1.24.3          # fitz – redaction, image insertion, page rendering
+
+# ── Image processing ─────────────────────────────────────────────────────────
+Pillow==10.3.0
+numpy>=1.24.0             # array ops for compositing / blending pipeline
+
+# ── AI backends (install what you need) ──────────────────────────────────────
+openai==1.30.1            # DALL-E 3/2 (set GENERATION_BACKEND=openai)
+httpx==0.27.0             # Gemini + Stability AI HTTP client
+
+# ── Optional: local background removal ───────────────────────────────────────
+# rembg==2.0.56           # uncomment for production-quality bg removal
+
+# ── Dev / testing ─────────────────────────────────────────────────────────────
+python-dotenv==1.0.1

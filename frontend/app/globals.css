@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --surface-2: #222636;
+  --border: #2e3348;
+  --accent: #6c6fee;
+  --accent-hover: #5a5de0;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --text: #e2e8f0;
+  --text-muted: #64748b;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--surface); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ── PDF canvas wrapper ── */
+.pdf-canvas-wrapper {
+  position: relative;
+  display: inline-block;
+  cursor: crosshair;
+  user-select: none;
+}
+.pdf-canvas-wrapper canvas { display: block; }
+
+/* Selection rect drawn by user */
+.selection-overlay {
+  position: absolute;
+  border: 2px solid #6c6fee;
+  background: rgba(108,111,238,0.12);
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* ── Spinner ── */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255,255,255,0.15);
+  border-top-color: #6c6fee;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+/* ── Dropzone ── */
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  border-radius: 0.75rem;
+  border: 2px dashed var(--border);
+  padding: 3rem;
+  text-align: center;
+  transition: all 0.2s;
+  cursor: pointer;
+}
+.dropzone:hover,
+.dropzone.active {
+  border-color: rgba(108,111,238,0.6);
+  background: rgba(108,111,238,0.05);
+}
