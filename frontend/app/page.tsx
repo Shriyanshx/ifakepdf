@@ -185,6 +185,9 @@ export default function Home() {
           <div className="inline-flex items-center gap-3 text-2xl font-bold text-slate-100">
             <Image src="/logo.svg" alt="ifakepdf logo" width={36} height={44} priority />
             ifakepdf
+            <span className="text-[10px] font-semibold tracking-widest uppercase px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">
+              Beta
+            </span>
           </div>
           <p className="text-slate-400 text-sm max-w-sm">
             Select any area on a PDF and let AI generate a signature, stamp,
@@ -209,6 +212,9 @@ export default function Home() {
         <div className="flex items-center gap-3">
           <Image src="/logo.svg" alt="ifakepdf logo" width={22} height={27} />
           <span className="font-bold text-slate-100">ifakepdf</span>
+          <span className="text-[9px] font-semibold tracking-widest uppercase px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">
+            Beta
+          </span>
           <span className="text-[#2e3348]">·</span>
           <div className="flex items-center gap-2 text-xs text-slate-400">
             <FileText size={13} className="text-slate-500" />
