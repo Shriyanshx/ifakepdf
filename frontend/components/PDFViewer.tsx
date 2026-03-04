@@ -87,8 +87,12 @@ export default function PDFViewer({
 }: PDFViewerProps) {
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null); // tracks available width
   const pdfDocRef = useRef<pdfjs.PDFDocumentProxy | null>(null);
   const viewportRef = useRef<pdfjs.PageViewport | null>(null);
+  // Holds the scale actually used for the current render (a ref, not state,
+  // so drag math always reads the latest value synchronously)
+  const activeScaleRef = useRef(scale);
 
   const [drawDrag, setDrawDrag] = useState<DrawDrag | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
@@ -102,6 +106,42 @@ export default function PDFViewer({
   const [hoveredHandle, setHoveredHandle] = useState<ResizeHandle>(null);
   const [loading, setLoading] = useState(true);
 
+  /** Compute the scale that makes the page fit the container, capped at `scale` prop. */
+  const getFitScale = useCallback(
+    (naturalPageWidth: number): number => {
+      const containerWidth = containerRef.current?.clientWidth ?? 0;
+      if (containerWidth <= 0 || naturalPageWidth <= 0) return scale;
+      const fit = (containerWidth - 4) / naturalPageWidth;
+      return Math.min(scale, Math.max(0.4, fit));
+    },
+    [scale]
+  );
+
+  // ── Render one page ───────────────────────────────────────────────────────
+  const renderPage = useCallback(async (doc: pdfjs.PDFDocumentProxy, idx: number) => {
+    setLoading(true);
+    const page = await doc.getPage(idx + 1);
+    const naturalW = page.getViewport({ scale: 1 }).width;
+    const s = getFitScale(naturalW);
+    activeScaleRef.current = s;
+
+    const viewport = page.getViewport({ scale: s });
+    viewportRef.current = viewport;
+
+    const canvas = pdfCanvasRef.current!;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width  = Math.round(viewport.width  * dpr);
+    canvas.height = Math.round(viewport.height * dpr);
+    canvas.style.width  = `${viewport.width}px`;
+    canvas.style.height = `${viewport.height}px`;
+
+    const ctx = canvas.getContext("2d")!;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    setLoading(false);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [getFitScale]);
+
   // ── Load PDF ──────────────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
@@ -113,30 +153,26 @@ export default function PDFViewer({
       renderPage(doc, pageIndex);
     })();
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file]);
 
+  // ── Re-render on page change ──────────────────────────────────────────────
   useEffect(() => {
     if (pdfDocRef.current) renderPage(pdfDocRef.current, pageIndex);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pageIndex, scale]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageIndex]);
 
-  const renderPage = async (doc: pdfjs.PDFDocumentProxy, idx: number) => {
-    setLoading(true);
-    const page = await doc.getPage(idx + 1);
-    const viewport = page.getViewport({ scale });
-    viewportRef.current = viewport;
-
-    const canvas = pdfCanvasRef.current!;
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = viewport.width * dpr;
-    canvas.height = viewport.height * dpr;
-    canvas.style.width = `${viewport.width}px`;
-    canvas.style.height = `${viewport.height}px`;
-
-    await page.render({ canvas, viewport }).promise;
-    setLoading(false);
-  };
+  // ── Re-render on container resize ────────────────────────────────────────
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      if (pdfDocRef.current) renderPage(pdfDocRef.current, pageIndex);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renderPage, pageIndex]);
 
   // ── Coordinate helpers ────────────────────────────────────────────────────
   const getRelativePos = (e: React.MouseEvent) => {
@@ -224,8 +260,8 @@ export default function PDFViewer({
 
     // ── Resize drag ──
     if (resizeDrag) {
-      const dx = (x - resizeDrag.startCanvasX) / scale;
-      const dy = -(y - resizeDrag.startCanvasY) / scale; // flip y
+      const dx = (x - resizeDrag.startCanvasX) / activeScaleRef.current;
+      const dy = -(y - resizeDrag.startCanvasY) / activeScaleRef.current; // flip y
       const sb = resizeDrag.startBBox;
       let newX = sb.x, newY = sb.y, newW = sb.width, newH = sb.height;
 
@@ -256,8 +292,8 @@ export default function PDFViewer({
     if (previewDrag) {
       const dx = x - previewDrag.startCanvasX;
       const dy = y - previewDrag.startCanvasY;
-      const dxPt = dx / scale;
-      const dyPt = -(dy / scale);
+      const dxPt = dx / activeScaleRef.current;
+      const dyPt = -(dy / activeScaleRef.current);
       const newBBox: BBox = {
         x: previewDrag.startBBox.x + dxPt,
         y: previewDrag.startBBox.y + dyPt,
@@ -354,7 +390,7 @@ export default function PDFViewer({
   const cursor = getCursor();
 
   return (
-    <div className="flex flex-col items-center gap-4 w-full">
+    <div ref={containerRef} className="flex flex-col items-center gap-4 w-full">
       {/* Hint text */}
       {previewOverlay ? (
         <p className="text-xs text-indigo-400 bg-indigo-500/10 border border-indigo-500/30 rounded-full px-4 py-1.5">
