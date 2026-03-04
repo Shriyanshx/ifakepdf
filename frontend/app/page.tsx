@@ -195,7 +195,7 @@ export default function Home() {
           <FileDropzone onFile={handleFile} />
         </div>
         <p className="mt-8 text-xs text-slate-600">
-          Files are processed locally — never stored anywhere.
+          Files are processed on our servers — never stored anywhere.
         </p>
       </main>
     );
